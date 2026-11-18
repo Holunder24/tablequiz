@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quizmaster</title>
+<meta name="robots" content="noindex">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,800&family=Inter:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap wide">
+  <header class="top">
+    <h1><span class="star">★</span> Quizmaster · <span id="title"></span></h1>
+    <span class="status" id="status">verbinde…</span>
+  </header>
+
+  <section id="gate" class="card" style="max-width:420px;margin:40px auto" hidden>
+    <h2>Quizmaster-Zugang</h2>
+    <input type="password" id="pin" placeholder="PIN" inputmode="numeric" autocomplete="off">
+    <p></p>
+    <button class="block" id="pinBtn">Öffnen</button>
+    <p class="notice bad" id="pinErr" hidden>Falsche PIN.</p>
+  </section>
+
+  <div id="app" class="host-grid" hidden>
+    <div>
+      <section class="card" id="control"></section>
+      <section class="card">
+        <div class="row" style="margin-bottom:8px">
+          <h2 style="margin:0">Antworten der Tische</h2>
+          <span class="spacer"></span>
+          <span class="pill" id="ansCount"></span>
+        </div>
+        <div id="answers"></div>
+      </section>
+    </div>
+    <div>
+      <section class="card">
+        <h2>Punktestand</h2>
+        <div id="scores"></div>
+      </section>
+      <section class="card links">
+        <h2>Links</h2>
+        <label class="lbl small" style="margin-top:0">Für die Tische (Handys)</label>
+        <div class="row"><input type="text" id="playerUrl" readonly style="flex:1"><button class="secondary" data-copy="playerUrl">Kopieren</button></div>
+        <label class="lbl small">Beamer / Fernseher</label>
+        <div class="row"><input type="text" id="screenUrl" readonly style="flex:1"><button class="secondary" data-copy="screenUrl">Öffnen</button></div>
+        <hr style="border:0;border-top:1px solid var(--line);margin:18px 0">
+        <button class="secondary block" id="resetBtn">🔄 Neues Spiel starten (alles zurücksetzen)</button>
+      </section>
+    </div>
+  </div>
+</div>
+
+<script src="vendor/mqtt.min.js"></script>
+<script src="config.js"></script>
+<script src="questions.js"></script>
+<script src="common.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+const ROUNDS = window.QUIZ_ROUNDS;
+const HOST_KEY = "tq_host_" + CFG.room;
+document.title = "Quizmaster · " + CFG.title;
+$("title").textContent = CFG.title;
+$("playerUrl").value = baseUrl();
+$("screenUrl").value = baseUrl() + "screen.html";
+
+function fresh() {
+  return { gameId: Math.random().toString(36).slice(2, 10), phase: "lobby", round: 0, qi: 0, names: {}, joined: [], answers: {}, points: {} };
+}
+let G = load(HOST_KEY, null) || fresh();
+let conn = null;
+
+// ---------- PIN ----------
+function unlock() {
+  try { sessionStorage.setItem("tq_pin_ok", "1"); } catch (e) {}
+  $("gate").hidden = true; $("app").hidden = false;
+  start();
+}
+$("pinBtn").addEventListener("click", () => {
+  if ($("pin").value.trim() === String(CFG.hostPin)) unlock(); else $("pinErr").hidden = false;
+});
+$("pin").addEventListener("keydown", (e) => { if (e.key === "Enter") $("pinBtn").click(); });
+let ok = false; try { ok = sessionStorage.getItem("tq_pin_ok") === "1"; } catch (e) {}
+if (ok) unlock(); else { $("gate").hidden = false; $("pin").focus(); }
+
+// ---------- Helfer ----------
+const cur = () => ROUNDS[G.round] && ROUNDS[G.round].questions[G.qi];
+const qid = (r = G.round, i = G.qi) => `r${r}q${i}`;
+const answerText = (q) => String(q.answer);
+const persist = () => save(HOST_KEY, G);
+
+function isCorrect(q, given) {
+  const g = norm(given);
+  if (!g) return false;
+  if (q.type === "choice") return given === q.answer;
+  const acc = [q.answer].concat(q.accept || []).map(norm);
+  return acc.some((a) => g === a || (a.length >= 3 && (" " + g + " ").includes(" " + a + " ")));
+}
+
+function autoScore() {
+  const q = cur(); const id = qid();
+  const ans = G.answers[id] || {};
+  G.points[id] = G.points[id] || {};
+  const P = G.points[id];
+  if (q.type === "estimate") {
+    const target = Number(q.answer);
+    let best = Infinity;
+    const diffs = {};
+    for (const t in ans) {
+      const n = parseFloat(String(ans[t].answer).replace(",", "."));
+      if (!isNaN(n)) { diffs[t] = Math.abs(n - target); best = Math.min(best, diffs[t]); }
+    }
+    for (const t in ans) if (P[t] == null) P[t] = diffs[t] === best ? 1 : 0;
+  } else {
+    for (const t in ans) if (P[t] == null) P[t] = isCorrect(q, ans[t].answer) ? 1 : 0;
+  }
+}
+
+function participants() {
+  const set = new Set(G.joined.map(Number));
+  for (const id in G.answers) for (const t in G.answers[id]) set.add(Number(t));
+  return [...set].sort((a, b) => a - b);
+}
+
+function computeScores() {
+  return participants().map((t) => {
+    const perRound = ROUNDS.map((R, r) => R.questions.reduce((s, _, i) => s + ((G.points[qid(r, i)] || {})[t] || 0), 0));
+    return { table: t, perRound: perRound.slice(0, Math.max(1, G.round + 1)), total: perRound.reduce((a, b) => a + b, 0) };
+  }).sort((a, b) => b.total - a.total || a.table - b.table);
+}
+
+// ---------- Senden ----------
+function publishState() {
+  const R = ROUNDS[G.round];
+  const q = cur();
+  const s = {
+    gameId: G.gameId, phase: G.phase, round: G.round, rounds: ROUNDS.length,
+    roundTitle: R ? R.title : "", qCount: R ? R.questions.length : 0,
+    tables: CFG.tables, names: G.names, joined: G.joined, title: CFG.title
+  };
+  if (["question", "closed", "reveal"].includes(G.phase) && q) {
+    s.question = { id: qid(), n: G.qi + 1, text: q.q, type: q.type, options: q.type === "choice" ? q.options : undefined };
+    const ans = G.answers[qid()] || {};
+    s.received = Object.keys(ans).map(Number);
+    if (G.phase === "reveal") {
+      s.answer = answerText(q);
+      s.results = G.points[qid()] || {};
+      s.given = Object.fromEntries(Object.entries(ans).map(([t, a]) => [t, a.answer]));
+    }
+  }
+  if (["scores", "end", "reveal"].includes(G.phase)) s.scores = computeScores();
+  if (conn) conn.publish(TOPIC.state, s, { retain: true });
+  persist();
+}
+
+// ---------- Ablauf ----------
+function step() {
+  const R = ROUNDS[G.round];
+  switch (G.phase) {
+    case "lobby": G.round = 0; G.qi = 0; G.phase = "intro"; break;
+    case "intro": G.phase = "question"; break;
+    case "question": autoScore(); G.phase = "closed"; break;
+    case "closed": G.phase = "reveal"; break;
+    case "reveal":
+      if (G.qi < R.questions.length - 1) { G.qi++; G.phase = "question"; }
+      else G.phase = G.round < ROUNDS.length - 1 ? "scores" : "end";
+      break;
+    case "scores": G.round++; G.qi = 0; G.phase = "intro"; break;
+  }
+  publishState(); renderAll();
+}
+
+function primaryLabel() {
+  const R = ROUNDS[G.round];
+  switch (G.phase) {
+    case "lobby": return "▶ Quiz starten – " + ROUNDS[0].title;
+    case "intro": return "▶ Frage 1 zeigen";
+    case "question": return "⏹ Antworten schließen";
+    case "closed": return "💡 Lösung zeigen";
+    case "reveal":
+      if (G.qi < R.questions.length - 1) return `▶ Nächste Frage (${G.qi + 2}/${R.questions.length})`;
+      return G.round < ROUNDS.length - 1 ? "📊 Runde beenden – Zwischenstand zeigen" : "🏆 Endstand zeigen";
+    case "scores": return "▶ " + ROUNDS[G.round + 1].title + " starten";
+    case "end": return null;
+  }
+}
+
+// ---------- Render ----------
+function renderAll() { renderControl(); renderAnswers(); renderScores(); }
+
+function renderControl() {
+  const R = ROUNDS[G.round]; const q = cur();
+  const phaseText = { lobby: "Warteraum", intro: "Rundenstart", question: "Frage läuft – Tische antworten", closed: "Antworten geschlossen", reveal: "Lösung wird gezeigt", scores: "Zwischenstand wird gezeigt", end: "Quiz beendet" }[G.phase];
+  let html = `<div class="qmeta"><span class="pill ${G.phase === "question" ? "live" : ""}">${phaseText}</span><span class="pill">${esc(R.title)}</span>`;
+  if (["question", "closed", "reveal"].includes(G.phase)) html += `<span class="pill">Frage ${G.qi + 1}/${R.questions.length}</span>`;
+  html += `</div>`;
+
+  if (["question", "closed", "reveal"].includes(G.phase)) {
+    html += `<div class="question">${esc(q.q)}</div>`;
+    if (q.type === "choice") html += `<ol class="small" type="A" style="margin:0 0 6px;padding-left:22px">${q.options.map((o) => `<li ${o === q.answer ? 'style="font-weight:700;color:var(--green)"' : ""}>${esc(o)}</li>`).join("")}</ol>`;
+    html += `<div class="solution">Lösung: <strong>${esc(answerText(q))}</strong>${q.type === "estimate" ? ' <span class="muted">(Schätzfrage – nächster Wert bekommt 1 Punkt)</span>' : ""}</div>`;
+  } else if (G.phase === "lobby") {
+    html += `<p>Die Tische können jetzt beitreten: <strong>${G.joined.length}</strong> von ${CFG.tables} verbunden.</p><p class="muted small">Tipp: Beamer-Ansicht öffnen – dort steht ein QR-Code zum Scannen.</p>`;
+  } else if (G.phase === "intro") {
+    html += `<div class="question">${esc(R.title)}</div><p class="muted">${R.questions.length} Fragen</p>`;
+  } else if (G.phase === "scores") {
+    html += `<p>Zwischenstand nach ${esc(R.title)} wird auf allen Geräten angezeigt.</p>`;
+  } else if (G.phase === "end") {
+    html += `<p>Der Endstand wird angezeigt. 🎉</p>`;
+  }
+
+  // Fortschritt
+  html += `<div class="progress">` + ROUNDS.map((Rr, r) => Rr.questions.map((_, i) => {
+    const done = r < G.round || (r === G.round && (i < G.qi || (i === G.qi && ["reveal", "scores", "end"].includes(G.phase))));
+    const isCur = r === G.round && i === G.qi && ["question", "closed"].includes(G.phase);
+    return `<span class="${isCur ? "cur" : done ? "done" : ""}"></span>`;
+  }).join("") + `<span style="background:none;width:8px"></span>`).join("") + `</div>`;
+
+  const label = primaryLabel();
+  html += `<p></p><div class="row">`;
+  if (label) html += `<button class="big" id="nextBtn" style="flex:1">${label}</button>`;
+  if (G.phase === "closed") html += `<button class="secondary" id="reopenBtn">↩ Wieder öffnen</button>`;
+  html += `</div>`;
+  $("control").innerHTML = html;
+  const nb = $("nextBtn"); if (nb) nb.addEventListener("click", step);
+  const rb = $("reopenBtn"); if (rb) rb.addEventListener("click", () => { G.phase = "question"; publishState(); renderAll(); });
+}
+
+function renderAnswers() {
+  const box = $("answers");
+  if (!["question", "closed", "reveal"].includes(G.phase)) {
+    const names = participants().map((t) => `<li>${esc(tableLabel(t, G.names))}</li>`).join("");
+    box.innerHTML = names ? `<p class="muted small">Verbundene Tische:</p><ul>${names}</ul>` : `<p class="muted">Noch keine Tische verbunden.</p>`;
+    $("ansCount").textContent = `${participants().length} Tische`;
+    return;
+  }
+  const id = qid(); const ans = G.answers[id] || {}; const P = G.points[id] || {};
+  const tables = [...new Set(participants().concat(Object.keys(ans).map(Number)))].sort((a, b) => a - b);
+  $("ansCount").textContent = `${Object.keys(ans).length} / ${tables.length} geantwortet`;
+  if (!tables.length) { box.innerHTML = `<p class="muted">Noch keine Tische verbunden.</p>`; return; }
+  const canScore = G.phase !== "question";
+  box.innerHTML = `<table class="ans-table"><thead><tr><th>Tisch</th><th>Antwort</th><th style="text-align:right">${canScore ? "Punkte" : ""}</th></tr></thead><tbody>` +
+    tables.map((t) => {
+      const a = ans[t];
+      const p = P[t];
+      const btns = canScore ? `<span class="pts-btns">${[[0, "0", "v0"], [0.5, "½", "vh"], [1, "1", "v1"]].map(([v, l, c]) => `<button data-t="${t}" data-v="${v}" class="${c} ${p === v ? "on" : ""}">${l}</button>`).join("")}</span>` : (a ? "✓" : "");
+      return `<tr class="${a ? "" : "empty"}"><td>${esc(tableLabel(t, G.names))}</td><td class="ans">${a ? esc(a.answer) : "—"}</td><td style="text-align:right">${btns}</td></tr>`;
+    }).join("") + `</tbody></table>` +
+    (G.phase === "question" ? `<p class="muted small">Punkte werden beim Schließen automatisch vorgeschlagen – du kannst sie danach anpassen.</p>` : "");
+  box.querySelectorAll(".pts-btns button").forEach((b) => b.addEventListener("click", () => {
+    G.points[id] = G.points[id] || {};
+    G.points[id][b.dataset.t] = Number(b.dataset.v);
+    publishState(); renderAll();
+  }));
+}
+
+function renderScores() { $("scores").innerHTML = rankRows(computeScores(), G.names); }
+
+// ---------- Links / Reset ----------
+document.querySelectorAll("[data-copy]").forEach((b) => b.addEventListener("click", () => {
+  const inp = $(b.dataset.copy);
+  if (b.dataset.copy === "screenUrl") { window.open(inp.value, "_blank"); return; }
+  inp.select();
+  (navigator.clipboard ? navigator.clipboard.writeText(inp.value) : Promise.reject()).then(() => { b.textContent = "Kopiert ✓"; setTimeout(() => b.textContent = "Kopieren", 1500); }).catch(() => document.execCommand && document.execCommand("copy"));
+}));
+$("resetBtn").addEventListener("click", () => {
+  if (!confirm("Wirklich alles zurücksetzen? Alle Antworten und Punkte gehen verloren.")) return;
+  G = fresh(); publishState(); renderAll();
+});
+
+// ---------- Start ----------
+function start() {
+  renderAll();
+  conn = connectQuiz({
+    subscribe: [TOPIC.answer, TOPIC.join, TOPIC.hello],
+    onStatus: (s) => { setStatusDot($("status"), s); if (s === "online") publishState(); },
+    onMessage: (topic, d) => {
+      if (topic === TOPIC.hello) { publishState(); return; }
+      const t = Number(d.table);
+      if (!t || t < 1 || t > CFG.tables) return;
+      let changed = false;
+      if (!G.joined.includes(t)) { G.joined.push(t); changed = true; }
+      const name = String(d.name || "").slice(0, 30).trim();
+      if (name && G.names[t] !== name) { G.names[t] = name; changed = true; }
+      if (topic === TOPIC.answer) {
+        if (G.phase !== "question" || d.qid !== qid()) { if (changed) { publishState(); renderAll(); } return; }
+        G.answers[d.qid] = G.answers[d.qid] || {};
+        G.answers[d.qid][t] = { answer: String(d.answer).slice(0, 120), ts: d.ts };
+        changed = true;
+      }
+      if (changed) { publishState(); renderAll(); }
+    }
+  });
+}
+</script>
+</body>
+</html>

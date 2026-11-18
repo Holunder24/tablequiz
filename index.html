@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Weihnachts-Tablequiz</title>
+<meta name="theme-color" content="#0e2a22">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,800&family=Inter:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <h1><span class="star">★</span> <span id="title">Tablequiz</span></h1>
+    <span class="status" id="status">verbinde…</span>
+  </header>
+
+  <!-- Tisch wählen -->
+  <section id="setup" class="card" hidden>
+    <h2>An welchem Tisch sitzt ihr?</h2>
+    <div class="table-grid" id="tableGrid"></div>
+    <label class="lbl" for="teamName">Teamname <span class="muted small">(optional)</span></label>
+    <input type="text" id="teamName" maxlength="30" placeholder="z. B. Die Glühweinengel" autocomplete="off">
+    <p></p>
+    <button class="block big" id="joinBtn" disabled>Los geht's</button>
+  </section>
+
+  <!-- Spiel -->
+  <section id="game" hidden>
+    <div class="row" style="color:#fff;margin-bottom:10px">
+      <strong id="meLabel"></strong>
+      <span class="spacer"></span>
+      <button class="ghost small" id="changeTable" style="color:#fff">Tisch ändern</button>
+    </div>
+    <div class="card" id="view"></div>
+  </section>
+</div>
+
+<script src="vendor/mqtt.min.js"></script>
+<script src="config.js"></script>
+<script src="common.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+document.title = CFG.title;
+$("title").textContent = CFG.title;
+
+const ME_KEY = "tq_me_" + CFG.room;
+const SENT_KEY = "tq_sent_" + CFG.room;
+let me = load(ME_KEY, { table: null, name: "" });
+let sent = load(SENT_KEY, { gameId: null, q: {} }); // qid -> antwort
+let state = null;
+let pick = null;     // Auswahl bei Multiple Choice / Text-Entwurf
+let editing = false; // Antwort wird gerade geändert
+let pickTable = me.table;
+
+// ---------- Verbindung ----------
+const conn = connectQuiz({
+  subscribe: [TOPIC.state],
+  onStatus: (s) => {
+    setStatusDot($("status"), s);
+    if (s === "online") {
+      conn.publish(TOPIC.hello, { t: Date.now() }, { qos: 0 });
+      if (me.table) sendJoin();
+    }
+  },
+  onMessage: (topic, data) => {
+    if (topic !== TOPIC.state) return;
+    if (state && data.gameId !== state.gameId) { pick = null; editing = false; }
+    if (sent.gameId !== data.gameId) { sent = { gameId: data.gameId, q: {} }; save(SENT_KEY, sent); }
+    if (state && state.question && data.question && state.question.id !== data.question.id) { pick = null; editing = false; }
+    state = data;
+    if (!$("setup").hidden) renderGrid();
+    render();
+  }
+});
+
+function sendJoin() {
+  conn.publish(TOPIC.join, { table: me.table, name: me.name || "" });
+}
+
+// ---------- Tisch wählen ----------
+function renderGrid() {
+  const n = (state && state.tables) || CFG.tables;
+  const names = (state && state.names) || {};
+  $("tableGrid").innerHTML = Array.from({ length: n }, (_, i) => {
+    const t = i + 1;
+    return `<button data-t="${t}" class="${pickTable === t ? "sel" : ""}"><span class="n">${t}</span><span class="s">${esc(names[t] || "Tisch")}</span></button>`;
+  }).join("");
+  $("joinBtn").disabled = !pickTable;
+}
+$("tableGrid").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-t]");
+  if (!b) return;
+  pickTable = Number(b.dataset.t);
+  const names = (state && state.names) || {};
+  if (!$("teamName").value && names[pickTable]) $("teamName").value = names[pickTable];
+  renderGrid();
+});
+$("joinBtn").addEventListener("click", () => {
+  me = { table: pickTable, name: $("teamName").value.trim() };
+  save(ME_KEY, me);
+  sendJoin();
+  showGame();
+});
+$("changeTable").addEventListener("click", () => {
+  pickTable = me.table;
+  $("teamName").value = me.name || "";
+  $("setup").hidden = false;
+  $("game").hidden = true;
+  renderGrid();
+});
+
+function showSetup() { $("setup").hidden = false; $("game").hidden = true; renderGrid(); }
+function showGame() { $("setup").hidden = true; $("game").hidden = false; render(); }
+
+// ---------- Ansicht ----------
+function render() {
+  if ($("game").hidden) return;
+  const names = (state && state.names) || {};
+  $("meLabel").textContent = tableLabel(me.table, Object.assign({}, names, me.name ? { [me.table]: me.name } : {}));
+  const v = $("view");
+  if (!state) {
+    v.innerHTML = `<div class="waiting"><div class="tree">🎄</div><h2>Warte auf den Quizmaster…</h2><p class="muted">Sobald das Quiz startet, erscheint hier die erste Frage.</p></div>`;
+    return;
+  }
+  const ph = state.phase;
+  if (ph === "lobby") {
+    v.innerHTML = `<div class="waiting"><div class="tree">🎄</div><h2>Ihr seid dabei!</h2><p class="muted">Gleich geht's los. Lasst das Handy offen – die Fragen erscheinen automatisch.</p></div>`;
+  } else if (ph === "intro") {
+    v.innerHTML = `<div class="waiting"><div class="tree">🔔</div><span class="tag">Gleich geht's los</span><h2>${esc(state.roundTitle)}</h2><p class="muted">${state.qCount} Fragen. Die erste kommt gleich.</p></div>`;
+  } else if (ph === "question" || ph === "closed" || ph === "reveal") {
+    renderQuestion(v);
+  } else if (ph === "scores" || ph === "end") {
+    v.innerHTML = `<span class="tag">${ph === "end" ? "Endstand" : "Zwischenstand"}</span><h2>${ph === "end" ? "🏆 Das Ergebnis" : "Wie steht's?"}</h2>${rankRows(state.scores, state.names)}${ph === "end" ? '<p class="center muted" style="margin-top:16px">Danke fürs Mitspielen & frohe Weihnachten! 🎅</p>' : '<p class="muted small" style="margin-top:12px">Die nächste Runde startet gleich.</p>'}`;
+  }
+}
+
+function renderQuestion(v) {
+  const q = state.question;
+  const ph = state.phase;
+  const myAnswer = sent.q[q.id];
+  const received = (state.received || []).includes(me.table);
+  const open = ph === "question";
+  const showForm = open && (myAnswer == null || editing);
+  let html = `<div class="qmeta"><span class="tag">${esc(state.roundTitle)} · Frage ${q.n} von ${state.qCount}</span></div>`;
+  html += `<div class="question">${esc(q.text)}</div>`;
+
+  if (q.type === "choice") {
+    const sel = showForm ? pick : myAnswer;
+    html += `<div class="options">` + q.options.map((o, i) => {
+      let cls = sel === o ? "sel" : "";
+      if (ph === "reveal" && o === state.answer) cls = "correct";
+      return `<button data-opt="${esc(o)}" ${showForm ? "" : "disabled"} class="${cls}" style="${showForm ? "" : "cursor:default;opacity:1"}"><span class="letter">${"ABCDEFGH"[i]}</span><span>${esc(o)}</span></button>`;
+    }).join("") + `</div>`;
+    if (showForm) html += `<p></p><button class="block big" id="sendBtn" ${pick ? "" : "disabled"}>Antwort abschicken</button>`;
+  } else if (showForm) {
+    const isNum = q.type === "estimate";
+    html += `<input type="${isNum ? "number" : "text"}" id="ansInput" ${isNum ? 'inputmode="decimal"' : ""} maxlength="80" placeholder="${isNum ? "Eure Schätzung (Zahl)" : "Eure Antwort"}" value="${esc(pick != null ? pick : myAnswer != null ? myAnswer : "")}" autocomplete="off">
+      <p></p><button class="block big" id="sendBtn">Antwort abschicken</button>`;
+  }
+
+  if (open && !showForm) {
+    if (q.type !== "choice") html += `<div class="notice">Eure Antwort: <strong>${esc(myAnswer)}</strong></div>`;
+    html += received
+      ? `<div class="notice ok">✓ Beim Quizmaster angekommen. Ihr könnt sie noch ändern, bis die Frage geschlossen wird.</div>`
+      : `<div class="notice warn">Wird gesendet…</div>`;
+    html += `<p></p><button class="secondary block" id="editBtn">Antwort ändern</button>`;
+  }
+  if (open && showForm && myAnswer == null && received) {
+    html += `<div class="notice ok">Euer Tisch hat schon von einem anderen Handy geantwortet. Wenn ihr hier sendet, wird die Antwort ersetzt.</div>`;
+  }
+
+  if (ph === "closed") {
+    const given = myAnswer != null ? myAnswer : null;
+    if (q.type !== "choice" || given == null) html += `<div class="notice">${given != null ? `Eure Antwort: <strong>${esc(given)}</strong>` : received ? "Euer Tisch hat geantwortet." : "Keine Antwort abgegeben."}</div>`;
+    html += `<div class="notice warn">⏳ Antworten sind geschlossen. Gleich kommt die Auflösung.</div>`;
+  }
+
+  if (ph === "reveal") {
+    const counted = state.given && state.given[me.table];
+    const res = state.results ? state.results[me.table] : undefined;
+    if (q.type !== "choice") html += `<p class="muted small" style="margin:14px 0 6px">Richtige Antwort</p><div class="answerbox">${esc(state.answer)}</div>`;
+    if (counted != null) {
+      if (q.type !== "choice") html += `<div class="notice">Eure Antwort: <strong>${esc(counted)}</strong></div>`;
+    } else {
+      html += `<div class="notice">Euer Tisch hat keine Antwort abgegeben.</div>`;
+    }
+    if (res != null) {
+      html += res >= 1 ? `<div class="notice ok">🎉 Richtig! +${fmtPts(res)} Punkt</div>`
+        : res > 0 ? `<div class="notice warn">Fast! +${fmtPts(res)} Punkte</div>`
+        : `<div class="notice bad">Leider nicht. 0 Punkte</div>`;
+    }
+    html += `<p class="muted small center" style="margin-top:14px">Warte auf die nächste Frage…</p>`;
+  }
+  v.innerHTML = html;
+
+  const inp = $("ansInput");
+  if (inp) {
+    inp.addEventListener("input", () => { pick = inp.value; });
+    inp.addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
+  }
+  v.querySelectorAll("button[data-opt]").forEach((b) => b.addEventListener("click", () => { pick = b.dataset.opt; render(); }));
+  const sb = $("sendBtn"); if (sb) sb.addEventListener("click", submit);
+  const eb = $("editBtn"); if (eb) eb.addEventListener("click", () => { editing = true; pick = sent.q[q.id]; render(); });
+}
+
+function submit() {
+  const q = state && state.question;
+  if (!q || state.phase !== "question") return;
+  const inp = $("ansInput");
+  const val = q.type === "choice" ? pick : (inp ? inp.value.trim() : "");
+  if (val == null || val === "") { if (inp) inp.focus(); return; }
+  sent.q[q.id] = val; save(SENT_KEY, sent);
+  conn.publish(TOPIC.answer, { qid: q.id, table: me.table, name: me.name || "", answer: val, ts: Date.now() });
+  editing = false; pick = null;
+  render();
+}
+
+// Start
+if (me.table) showGame(); else showSetup();
+</script>
+</body>
+</html>

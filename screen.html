@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tablequiz – Beamer</title>
+<meta name="robots" content="noindex">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,800&family=Inter:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="screen">
+<div class="screen-wrap">
+  <header>
+    <span><span style="color:var(--gold)">★</span> <span id="title"></span></span>
+    <span class="status" id="status">verbinde…</span>
+  </header>
+  <main class="screen-main" id="main"></main>
+</div>
+<script src="vendor/mqtt.min.js"></script>
+<script src="vendor/qrcode.js"></script>
+<script src="config.js"></script>
+<script src="common.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+$("title").textContent = CFG.title;
+document.title = CFG.title + " – Beamer";
+const playerUrl = baseUrl();
+let state = null;
+
+function qrSvg(text) {
+  const qr = qrcode(0, "M"); qr.addData(text); qr.make();
+  return qr.createSvgTag({ cellSize: 8, margin: 0, scalable: true });
+}
+
+function render() {
+  const m = $("main");
+  if (!state || state.phase === "lobby") {
+    const joined = state ? (state.joined || []).slice().sort((a, b) => a - b) : [];
+    m.innerHTML = `<div class="lobby">
+      <div class="qr">${qrSvg(playerUrl)}</div>
+      <div>
+        <p class="round-title" style="font-size:4.6vw">${esc(CFG.title)}</p>
+        <p class="sub">📱 QR-Code scannen, Tisch wählen – und los!</p>
+        <p class="url">${esc(playerUrl)}</p>
+        <div class="joined">${joined.map((t) => `<span>✓ ${esc(tableLabel(t, state.names))}</span>`).join("")}</div>
+      </div></div>`;
+    return;
+  }
+  const ph = state.phase;
+  if (ph === "intro") {
+    m.innerHTML = `<p class="sub">Gleich geht's los</p><p class="round-title">${esc(state.roundTitle)}</p><p class="sub">${state.qCount} Fragen</p>`;
+  } else if (["question", "closed", "reveal"].includes(ph)) {
+    const q = state.question;
+    let h = `<p class="sub">${esc(state.roundTitle)} · Frage ${q.n} von ${state.qCount}</p><p class="bigq">${esc(q.text)}</p>`;
+    if (q.type === "choice") {
+      h += `<div class="opts">` + q.options.map((o, i) => {
+        const cls = ph === "reveal" ? (o === state.answer ? "correct" : "dim") : "";
+        return `<div class="${cls}"><b>${"ABCDEFGH"[i]}</b><span>${esc(o)}</span></div>`;
+      }).join("") + `</div>`;
+    } else if (ph === "reveal") {
+      h += `<p class="sub">Richtige Antwort:</p><p class="sol">${esc(state.answer)}</p>`;
+    }
+    const total = Math.max((state.joined || []).length, (state.received || []).length);
+    if (ph === "question") h += `<p class="count">✍️ ${(state.received || []).length} von ${total} Tischen haben geantwortet</p>`;
+    if (ph === "closed") h += `<p class="count">⏳ Antworten geschlossen – gleich kommt die Auflösung</p>`;
+    if (ph === "reveal" && state.results) {
+      const right = Object.entries(state.results).filter(([, p]) => p > 0).length;
+      h += `<p class="count">🎉 ${right} von ${(state.received || []).length} Tischen lagen richtig</p>`;
+    }
+    m.innerHTML = h;
+  } else if (ph === "scores" || ph === "end") {
+    m.innerHTML = `<p class="round-title" style="font-size:4vw;margin-bottom:3vh">${ph === "end" ? "🏆 Endstand" : "📊 Zwischenstand"}</p>${rankRows(state.scores, state.names)}`;
+  }
+}
+
+connectQuiz({
+  subscribe: [TOPIC.state],
+  onStatus: (s) => setStatusDot($("status"), s),
+  onMessage: (topic, d) => { if (topic === TOPIC.state) { state = d; render(); } }
+});
+render();
+</script>
+</body>
+</html>
