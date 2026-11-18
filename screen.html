@@ -65,8 +65,12 @@ function render() {
     if (ph === "question") h += `<p class="count">✍️ ${(state.received || []).length} von ${total} Tischen haben geantwortet</p>`;
     if (ph === "closed") h += `<p class="count">⏳ Antworten geschlossen – gleich kommt die Auflösung</p>`;
     if (ph === "reveal" && state.results) {
-      const right = Object.entries(state.results).filter(([, p]) => p > 0).length;
-      h += `<p class="count">🎉 ${right} von ${(state.received || []).length} Tischen lagen richtig</p>`;
+      const winners = Object.entries(state.results).filter(([, p]) => p > 0).map(([t]) => Number(t));
+      if (q.type === "estimate") {
+        h += `<p class="count">🎯 ${winners.length ? "Am nächsten dran: " + winners.map((t) => esc(tableLabel(t, state.names))).join(", ") : "Keiner hat geschätzt"}</p>`;
+      } else {
+        h += `<p class="count">🎉 ${winners.length} von ${(state.received || []).length} Tischen lagen richtig</p>`;
+      }
     }
     m.innerHTML = h;
   } else if (ph === "scores" || ph === "end") {

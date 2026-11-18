@@ -13,9 +13,12 @@ Live-Tablequiz für die Weihnachtsfeier. Läuft komplett über GitHub Pages, ohn
 2. Die Tische scannen den QR-Code, wählen ihren Tisch und optional einen Teamnamen.
 3. Quizmaster klickt sich durch: **Frage zeigen → Antworten schließen → Lösung zeigen → Nächste Frage**.
    Die Tische sehen immer nur die aktuelle Frage und können nicht vorspulen.
-4. Nach Runde 1 gibt es einen Zwischenstand, nach Runde 2 den Endstand.
+4. Nach jeder Runde gibt es einen Zwischenstand, am Schluss den Endstand.
 
-Punkte werden beim Schließen automatisch vorgeschlagen (Auswahlfragen exakt, Freitext tolerant, Schätzfragen: nächster Wert gewinnt).
+Runden: 1. Unnützes Weihnachtswissen · 2. Unnützes VHV-Wissen · 3. Unnützes Hannover-Wissen (je 8 Fragen).
+
+Punkte werden beim Schließen automatisch vorgeschlagen (Auswahlfragen exakt, Freitext tolerant inkl. kleiner Tippfehler, Schätzfragen: nächster Wert gewinnt).
+Gleiche Antworten werden zusammengefasst, sodass jede Antwort nur einmal bewertet werden muss.
 Pro Tisch lässt sich jederzeit 0 / ½ / 1 Punkt setzen.
 
 ## Anpassen

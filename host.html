@@ -89,7 +89,7 @@ if (ok) unlock(); else { $("gate").hidden = false; $("pin").focus(); }
 // ---------- Helfer ----------
 const cur = () => ROUNDS[G.round] && ROUNDS[G.round].questions[G.qi];
 const qid = (r = G.round, i = G.qi) => `r${r}q${i}`;
-const answerText = (q) => String(q.answer);
+const answerText = (q) => q.display || String(q.answer);
 const persist = () => save(HOST_KEY, G);
 
 function isCorrect(q, given) {
@@ -97,7 +97,26 @@ function isCorrect(q, given) {
   if (!g) return false;
   if (q.type === "choice") return given === q.answer;
   const acc = [q.answer].concat(q.accept || []).map(norm);
-  return acc.some((a) => g === a || (a.length >= 3 && (" " + g + " ").includes(" " + a + " ")));
+  const words = g.split(" ");
+  return acc.some((a) => {
+    if (g === a || (a.length >= 3 && (" " + g + " ").includes(" " + a + " "))) return true;
+    // Tippfehler tolerieren: ganze Antwort oder einzelne Wörter
+    const tol = a.length >= 8 ? 2 : a.length >= 4 ? 1 : 0;
+    if (!tol) return false;
+    if (lev(g, a) <= tol) return true;
+    const n = a.split(" ").length;
+    for (let i = 0; i + n <= words.length; i++) if (lev(words.slice(i, i + n).join(" "), a) <= tol) return true;
+    return false;
+  });
+}
+
+function lev(a, b) {
+  if (Math.abs(a.length - b.length) > 3) return 99;
+  const d = Array.from({ length: a.length + 1 }, (_, i) => [i]);
+  for (let j = 1; j <= b.length; j++) d[0][j] = j;
+  for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++)
+    d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+  return d[a.length][b.length];
 }
 
 function autoScore() {
@@ -242,6 +261,32 @@ function renderAnswers() {
   $("ansCount").textContent = `${Object.keys(ans).length} / ${tables.length} geantwortet`;
   if (!tables.length) { box.innerHTML = `<p class="muted">Noch keine Tische verbunden.</p>`; return; }
   const canScore = G.phase !== "question";
+  const ptsBtns = (tablesAttr, p) => `<span class="pts-btns">${[[0, "0", "v0"], [0.5, "½", "vh"], [1, "1", "v1"]].map(([v, l, c]) => `<button data-ts="${tablesAttr}" data-v="${v}" class="${c} ${p === v ? "on" : ""}">${l}</button>`).join("")}</span>`;
+  if (canScore) {
+    // Gleiche Antworten zusammenfassen -> nur einmal bewerten
+    const groups = {};
+    for (const t of tables) {
+      const a = ans[t]; if (!a) continue;
+      const key = norm(a.answer) || a.answer;
+      (groups[key] = groups[key] || { text: a.answer, tables: [] }).tables.push(t);
+    }
+    const list = Object.values(groups).sort((x, y) => y.tables.length - x.tables.length);
+    const missing = tables.filter((t) => !ans[t]);
+    box.innerHTML = `<table class="ans-table"><thead><tr><th>Antwort</th><th>Tische</th><th style="text-align:right">Punkte</th></tr></thead><tbody>` +
+      list.map((g) => {
+        const vals = [...new Set(g.tables.map((t) => P[t]))];
+        const p = vals.length === 1 ? vals[0] : null;
+        return `<tr><td class="ans">${esc(g.text)}${g.tables.length > 1 ? ` <span class="pill">${g.tables.length}×</span>` : ""}</td><td class="small">${g.tables.map((t) => esc(tableLabel(t, G.names))).join("<br>")}</td><td style="text-align:right">${ptsBtns(g.tables.join(","), p)}</td></tr>`;
+      }).join("") +
+      (missing.length ? `<tr class="empty"><td>— keine Antwort</td><td class="small">${missing.map((t) => esc(tableLabel(t, G.names))).join("<br>")}</td><td></td></tr>` : "") +
+      `</tbody></table><p class="muted small">Gleiche Antworten sind zusammengefasst – ein Klick bewertet alle Tische mit dieser Antwort.</p>`;
+    box.querySelectorAll(".pts-btns button").forEach((b) => b.addEventListener("click", () => {
+      G.points[id] = G.points[id] || {};
+      b.dataset.ts.split(",").forEach((t) => { G.points[id][t] = Number(b.dataset.v); });
+      publishState(); renderAll();
+    }));
+    return;
+  }
   box.innerHTML = `<table class="ans-table"><thead><tr><th>Tisch</th><th>Antwort</th><th style="text-align:right">${canScore ? "Punkte" : ""}</th></tr></thead><tbody>` +
     tables.map((t) => {
       const a = ans[t];

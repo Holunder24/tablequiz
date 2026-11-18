@@ -156,7 +156,7 @@ function renderQuestion(v) {
     if (showForm) html += `<p></p><button class="block big" id="sendBtn" ${pick ? "" : "disabled"}>Antwort abschicken</button>`;
   } else if (showForm) {
     const isNum = q.type === "estimate";
-    html += `<input type="${isNum ? "number" : "text"}" id="ansInput" ${isNum ? 'inputmode="decimal"' : ""} maxlength="80" placeholder="${isNum ? "Eure Schätzung (Zahl)" : "Eure Antwort"}" value="${esc(pick != null ? pick : myAnswer != null ? myAnswer : "")}" autocomplete="off">
+    html += `<input type="text" id="ansInput" ${isNum ? 'inputmode="decimal"' : ""} maxlength="80" placeholder="${isNum ? "Eure Schätzung (Zahl)" : "Eure Antwort"}" value="${esc(pick != null ? pick : myAnswer != null ? myAnswer : "")}" autocomplete="off">
       <p></p><button class="block big" id="sendBtn">Antwort abschicken</button>`;
   }
 
